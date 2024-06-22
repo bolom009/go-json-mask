@@ -217,6 +217,7 @@ func (j *JsonMask) maskAll(pk string, m map[string]any) (err error) {
 	return nil
 }
 
+// maskSlice method for masking values what inside array
 func (j *JsonMask) maskSlice(k, pk string, sl []any, ignoreGlobal bool) (err error) {
 	for i, val := range sl {
 		fk := fmt.Sprintf("%s[%d]", pk, i)
