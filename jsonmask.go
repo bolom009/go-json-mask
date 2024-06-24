@@ -12,6 +12,10 @@ import (
 	"unicode/utf8"
 )
 
+type SettableType interface {
+	int | string
+}
+
 const (
 	pathKey          = "/"
 	randomIntRange   = 1000
@@ -77,7 +81,7 @@ func (j *JsonMask) Mask(value string) (string, error) {
 		return "", fmt.Errorf("json unmarshal: %w", err)
 	}
 
-	if err := j.mask("", m); err != nil {
+	if err := j.mask("", m, true); err != nil {
 		return "", fmt.Errorf("mask: %w", err)
 	}
 
@@ -90,24 +94,22 @@ func (j *JsonMask) Mask(value string) (string, error) {
 }
 
 // mask method for masking parsed map with global and xpath fields
-func (j *JsonMask) mask(pk string, m map[string]any) (err error) {
+func (j *JsonMask) mask(pk string, m map[string]any, ignoreGlobal bool) (err error) {
 	for k, val := range m {
 		fk := pk + pathKey + k
 		switch v := val.(type) {
 		case map[string]any:
-			if _, ok := j.globalFields[k]; ok {
-				if err = j.maskAll(fk, v); err != nil {
-					return err
-				}
-				break
+			ignoreGlobalVal := !(!ignoreGlobal || j.isGlobalField(k))
+			if err = j.mask(fk, v, ignoreGlobalVal); err != nil {
+				return err
 			}
-
-			if err = j.mask(fk, v); err != nil {
+		case []any:
+			if err = j.maskSlice(k, fk, v, ignoreGlobal); err != nil {
 				return err
 			}
 		case string:
 			if j.maskStringFunc != nil {
-				if _, ok := j.globalFields[k]; ok {
+				if !ignoreGlobal || j.isGlobalField(k) {
 					m[k], err = j.maskStringFunc(fk, v)
 					if err != nil {
 						return err
@@ -127,7 +129,7 @@ func (j *JsonMask) mask(pk string, m map[string]any) (err error) {
 					break
 				}
 
-				if _, ok := j.globalFields[k]; ok {
+				if !ignoreGlobal || j.isGlobalField(k) {
 					m[k], err = j.maskIntFunc(fk, int(v))
 					if err != nil {
 						return err
@@ -146,7 +148,7 @@ func (j *JsonMask) mask(pk string, m map[string]any) (err error) {
 				break
 			}
 
-			if _, ok := j.globalFields[k]; ok {
+			if !ignoreGlobal || j.isGlobalField(k) {
 				m[k], err = j.maskFloat64Func(fk, v)
 				if err != nil {
 					return err
@@ -158,55 +160,6 @@ func (j *JsonMask) mask(pk string, m map[string]any) (err error) {
 				if err != nil {
 					return err
 				}
-			}
-		case []any:
-			if err = j.maskSlice(k, fk, v, true); err != nil {
-				return err
-			}
-		case bool, nil: // skip nil or boolean types
-		default:
-			return fmt.Errorf("unknow type: %T", v)
-		}
-	}
-
-	return nil
-}
-
-// maskAll method for masking all what inside under key
-func (j *JsonMask) maskAll(pk string, m map[string]any) (err error) {
-	for k, val := range m {
-		fk := pk + pathKey + k
-		switch v := val.(type) {
-		case map[string]any:
-			if err = j.maskAll(fk, v); err != nil {
-				return err
-			}
-		case string:
-			if j.maskStringFunc != nil {
-				m[k], err = j.maskStringFunc(fk, v)
-				if err != nil {
-					return err
-				}
-			}
-		case float64:
-			if isInteger(v) {
-				if j.maskIntFunc == nil {
-					break
-				}
-
-				if m[k], err = j.maskIntFunc(fk, int(v)); err != nil {
-					return err
-				}
-			}
-
-			if j.maskFloat64Func != nil {
-				if m[k], err = j.maskFloat64Func(fk, v); err != nil {
-					return err
-				}
-			}
-		case []any:
-			if err = j.maskSlice(k, fk, v, false); err != nil {
-				return err
 			}
 		case bool, nil: // skip nil or boolean types
 		default:
@@ -223,20 +176,17 @@ func (j *JsonMask) maskSlice(k, pk string, sl []any, ignoreGlobal bool) (err err
 		fk := fmt.Sprintf("%s[%d]", pk, i)
 		switch v := val.(type) {
 		case map[string]any:
-			if _, ok := j.globalFields[k]; !ignoreGlobal || ok {
-				if err = j.maskAll(fk, v); err != nil {
-					return err
-				}
-
-				break
+			ignoreGlobalVal := !(!ignoreGlobal || j.isGlobalField(k))
+			if err = j.mask(fk, v, ignoreGlobalVal); err != nil {
+				return err
 			}
-
-			if err = j.mask(fk, v); err != nil {
+		case []any:
+			if err = j.maskSlice(k, fk, v, ignoreGlobal); err != nil {
 				return err
 			}
 		case string:
 			if j.maskStringFunc != nil {
-				if _, ok := j.globalFields[k]; !ignoreGlobal || ok {
+				if !ignoreGlobal || j.isGlobalField(k) {
 					sl[i], err = j.maskStringFunc(fk, v)
 					if err != nil {
 						return err
@@ -244,7 +194,7 @@ func (j *JsonMask) maskSlice(k, pk string, sl []any, ignoreGlobal bool) (err err
 				}
 
 				if _, ok := j.pathFields[fk]; ok {
-					sl[i], err = j.maskStringFunc(pk, v)
+					sl[i], err = j.maskStringFunc(fk, v)
 					if err != nil {
 						return err
 					}
@@ -256,7 +206,7 @@ func (j *JsonMask) maskSlice(k, pk string, sl []any, ignoreGlobal bool) (err err
 					break
 				}
 
-				if _, ok := j.globalFields[k]; !ignoreGlobal || ok {
+				if !ignoreGlobal || j.isGlobalField(k) {
 					sl[i], err = j.maskIntFunc(fk, int(v))
 					if err != nil {
 						return err
@@ -264,7 +214,7 @@ func (j *JsonMask) maskSlice(k, pk string, sl []any, ignoreGlobal bool) (err err
 				}
 
 				if _, ok := j.pathFields[fk]; ok {
-					sl[i], err = j.maskIntFunc(pk, int(v))
+					sl[i], err = j.maskIntFunc(fk, int(v))
 					if err != nil {
 						return err
 					}
@@ -275,7 +225,7 @@ func (j *JsonMask) maskSlice(k, pk string, sl []any, ignoreGlobal bool) (err err
 				break
 			}
 
-			if _, ok := j.globalFields[k]; !ignoreGlobal || ok {
+			if !ignoreGlobal || j.isGlobalField(k) {
 				if sl[i], err = j.maskFloat64Func(fk, v); err != nil {
 					return err
 				}
@@ -287,10 +237,6 @@ func (j *JsonMask) maskSlice(k, pk string, sl []any, ignoreGlobal bool) (err err
 					return err
 				}
 			}
-		case []any:
-			if err = j.maskSlice(k, fk, v, false); err != nil {
-				return err
-			}
 		case bool, nil: // skip nil or boolean types
 		default:
 			return fmt.Errorf("unknow type: %T", v)
@@ -298,6 +244,12 @@ func (j *JsonMask) maskSlice(k, pk string, sl []any, ignoreGlobal bool) (err err
 	}
 
 	return nil
+}
+
+// isGlobalFields check field on contains in list at global fields
+func (j *JsonMask) isGlobalField(field string) bool {
+	_, ok := j.globalFields[field]
+	return ok
 }
 
 // MaskFilledString masks the string length of the value with the same length or by passed length
